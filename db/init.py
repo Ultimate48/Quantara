@@ -26,7 +26,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS price_data (
             id SERIAL PRIMARY KEY,
             ticker VARCHAR(20) NOT NULL,
-            date DATE NOT NULL,
+            date TIMESTAMP NOT NULL,
             open NUMERIC,
             high NUMERIC,
             low NUMERIC,
@@ -38,10 +38,22 @@ def init_db():
     """)
 
     cur.execute("""
+        CREATE TABLE IF NOT EXISTS strategies (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(50) UNIQUE NOT NULL,
+            description TEXT,
+            columns JSONB NOT NULL,
+            signal_rule TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS backtest_runs (
             id SERIAL PRIMARY KEY,
-            ticker VARCHAR(20),
-            strategy VARCHAR(50),
+            strategy_id INTEGER REFERENCES strategies(id),
+            data_tickers JSONB NOT NULL,
+            execute_on VARCHAR(20) NOT NULL,
             start_date DATE,
             end_date DATE,
             initial_capital NUMERIC,
