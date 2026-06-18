@@ -6,7 +6,7 @@ import yfinance as yf
 from datetime import datetime, timedelta
 from db.init import get_connection
 
-def fetch_and_store(ticker: str, start: str = None, end: str = None):
+def fetch_and_store(ticker: str, start: str = None, end: str = None, interval: str = "1d"):
     if start is None:
         start = (datetime.today() - timedelta(days=5*365)).strftime("%Y-%m-%d")
     if end is None:
@@ -19,7 +19,7 @@ def fetch_and_store(ticker: str, start: str = None, end: str = None):
     name = info.get("longName") or info.get("shortName") or ticker
     market = "NSE" if ticker.endswith(".NS") else "NYSE" if ticker.endswith(".NYSE") else "US"
 
-    df = stock.history(start=start, end=end)
+    df = stock.history(start=start, end=end, interval=interval)
 
     if df.empty:
         print(f"No data found for {ticker}. Check the ticker symbol.")
