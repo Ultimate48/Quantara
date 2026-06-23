@@ -19,35 +19,142 @@ def generate_signals(name: str, ticker: str, start: str = None, end: str = None)
     return df
 
 
-def simulate_trades(df: pd.DataFrame, initial_capital: float = 100000) -> dict:
+def simulate_trades(df: pd.DataFrame, initial_capital: float = 100000, cooldown: int = 0,
+                    stop_loss: float = None, take_profit: float = None,
+                    mode: str = "long", confirm_buy: int = 1, confirm_sell: int = 1) -> dict:
+    """
+    mode: "long" — long only (default)
+          "short" — short only
+          "long_short" — both directions
+    """
     cash = initial_capital
     shares = 0.0
+    short_shares = 0.0
+    short_entry_price = None
     portfolio_values = []
     trades = []
+    cooldown_remaining = 0
+    entry_price = None
+    buy_streak = 0
+    sell_streak = 0
 
     for date, row in df.iterrows():
         price = row["close"]
         signal = row["signal"]
 
-        if signal == 1 and cash > 0:
-            shares_bought = cash / price
-            shares += shares_bought
-            trades.append({
-                "date": date, "type": "buy", "price": price,
-                "shares": shares_bought, "cash_after": 0.0
-            })
-            cash = 0.0
+        if cooldown_remaining > 0:
+            cooldown_remaining -= 1
 
-        elif signal == -1 and shares > 0:
-            proceeds = shares * price
-            trades.append({
-                "date": date, "type": "sell", "price": price,
-                "shares": shares, "cash_after": proceeds
-            })
-            cash = proceeds
-            shares = 0.0
+        # ── Stop loss / take profit on LONG position ──
+        if shares > 0 and entry_price is not None:
+            price_change = (price - entry_price) / entry_price
 
-        portfolio_value = cash + shares * price
+            if stop_loss is not None and price_change <= -stop_loss:
+                proceeds = shares * price
+                trades.append({"date": date, "type": "sell", "price": price,
+                                "shares": shares, "cash_after": proceeds, "reason": "stop_loss"})
+                cash = proceeds
+                shares = 0.0
+                entry_price = None
+                cooldown_remaining = cooldown
+                portfolio_values.append({"date": date, "value": cash})
+                continue
+
+            if take_profit is not None and price_change >= take_profit:
+                proceeds = shares * price
+                trades.append({"date": date, "type": "sell", "price": price,
+                                "shares": shares, "cash_after": proceeds, "reason": "take_profit"})
+                cash = proceeds
+                shares = 0.0
+                entry_price = None
+                cooldown_remaining = cooldown
+                portfolio_values.append({"date": date, "value": cash})
+                continue
+
+        # ── Stop loss / take profit on SHORT position ──
+        if short_shares > 0 and short_entry_price is not None:
+            price_change = (price - short_entry_price) / short_entry_price
+
+            if stop_loss is not None and price_change >= stop_loss:
+                # price rose X% above short entry — stop loss
+                pnl = (short_entry_price - price) * short_shares
+                cash = cash + pnl
+                trades.append({"date": date, "type": "cover", "price": price,
+                                "shares": short_shares, "cash_after": cash, "reason": "stop_loss"})
+                short_shares = 0.0
+                short_entry_price = None
+                cooldown_remaining = cooldown
+                portfolio_values.append({"date": date, "value": cash})
+                continue
+
+            if take_profit is not None and price_change <= -take_profit:
+                # price fell X% below short entry — take profit
+                pnl = (short_entry_price - price) * short_shares
+                cash = cash + pnl
+                trades.append({"date": date, "type": "cover", "price": price,
+                                "shares": short_shares, "cash_after": cash, "reason": "take_profit"})
+                short_shares = 0.0
+                short_entry_price = None
+                cooldown_remaining = cooldown
+                portfolio_values.append({"date": date, "value": cash})
+                continue
+
+        # ── Signal handling ──
+        # Track confirmation streaks
+        if signal == 1:
+            buy_streak += 1
+            sell_streak = 0
+        elif signal == -1:
+            sell_streak += 1
+            buy_streak = 0
+        else:
+            buy_streak = 0
+            sell_streak = 0
+
+        buy_confirmed = buy_streak >= confirm_buy
+        sell_confirmed = sell_streak >= confirm_sell
+
+        if buy_confirmed:
+            # Cover short first if in short position
+            if short_shares > 0 and mode in ["long_short"]:
+                pnl = (short_entry_price - price) * short_shares
+                cash = cash + pnl
+                trades.append({"date": date, "type": "cover", "price": price,
+                                "shares": short_shares, "cash_after": cash, "reason": "signal"})
+                short_shares = 0.0
+                short_entry_price = None
+                cooldown_remaining = cooldown
+
+            # Go long if allowed
+            if mode in ["long", "long_short"] and cash > 0 and cooldown_remaining == 0:
+                shares_bought = cash / price
+                shares += shares_bought
+                entry_price = price
+                trades.append({"date": date, "type": "buy", "price": price,
+                                "shares": shares_bought, "cash_after": 0.0, "reason": "signal"})
+                cash = 0.0
+
+        elif sell_confirmed:
+            # Sell long first if in long position
+            if shares > 0 and mode in ["long", "long_short"]:
+                proceeds = shares * price
+                trades.append({"date": date, "type": "sell", "price": price,
+                                "shares": shares, "cash_after": proceeds, "reason": "signal"})
+                cash = proceeds
+                shares = 0.0
+                entry_price = None
+                cooldown_remaining = cooldown
+
+            # Go short if allowed
+            if mode in ["short", "long_short"] and short_shares == 0 and cooldown_remaining == 0:
+                short_shares = cash / price
+                short_entry_price = price
+                trades.append({"date": date, "type": "short", "price": price,
+                                "shares": short_shares, "cash_after": cash, "reason": "signal"})
+        # Portfolio value calculation
+        long_value = shares * price
+        short_pnl = (short_entry_price - price) * short_shares if short_shares > 0 and short_entry_price else 0
+        portfolio_value = cash + long_value + short_pnl
         portfolio_values.append({"date": date, "value": portfolio_value})
 
     equity_curve = pd.DataFrame(portfolio_values).set_index("date")
@@ -63,7 +170,7 @@ def simulate_trades(df: pd.DataFrame, initial_capital: float = 100000) -> dict:
 
 def compute_benchmark(df: pd.DataFrame, initial_capital: float = 100000) -> pd.DataFrame:
     first_price = df["close"].iloc[0]
-    shares = float(initial_capital) / first_price
+    shares = initial_capital / first_price
     benchmark = (df["close"] * shares).to_frame(name="value")
     return benchmark
 
@@ -82,7 +189,8 @@ def plot_results(df: pd.DataFrame, result: dict, ticker: str, strategy_name: str
 
     if not trade_log.empty:
         buys = trade_log[trade_log["type"] == "buy"]
-        sells = trade_log[trade_log["type"] == "sell"]
+        sells = trade_log[trade_log["type"].isin(["sell", "cover"])]
+        shorts = trade_log[trade_log["type"] == "short"]
 
         if not buys.empty:
             buy_values = equity_curve.loc[buys["date"], "value"]
@@ -90,7 +198,11 @@ def plot_results(df: pd.DataFrame, result: dict, ticker: str, strategy_name: str
 
         if not sells.empty:
             sell_values = equity_curve.loc[sells["date"], "value"]
-            axes[0].scatter(sells["date"], sell_values, color="red", marker="v", s=100, label="Sell", zorder=5)
+            axes[0].scatter(sells["date"], sell_values, color="red", marker="v", s=100, label="Sell/Cover", zorder=5)
+
+        if not shorts.empty:
+            short_values = equity_curve.loc[shorts["date"], "value"]
+            axes[0].scatter(shorts["date"], short_values, color="orange", marker="v", s=100, label="Short", zorder=5)
 
     axes[0].set_title(f"{strategy_name} on {ticker} — Equity Curve")
     axes[0].set_ylabel("Portfolio Value")
@@ -104,6 +216,7 @@ def plot_results(df: pd.DataFrame, result: dict, ticker: str, strategy_name: str
 
     plt.tight_layout()
     plt.show()
+
 
 def print_summary(result: dict, ticker: str, strategy_name: str):
     equity_curve = result["equity_curve"]
@@ -124,11 +237,16 @@ def print_summary(result: dict, ticker: str, strategy_name: str):
 
     win_rate = 0.0
     if not trade_log.empty:
-        sells = trade_log[trade_log["type"] == "sell"].reset_index(drop=True)
-        buys = trade_log[trade_log["type"] == "buy"].reset_index(drop=True)
+        sells = trade_log[trade_log["type"].isin(["sell", "cover"])].reset_index(drop=True)
+        buys = trade_log[trade_log["type"].isin(["buy", "short"])].reset_index(drop=True)
         wins = 0
         for i in range(min(len(buys), len(sells))):
-            if sells.iloc[i]["price"] > buys.iloc[i]["price"]:
+            buy_price = buys.iloc[i]["price"]
+            sell_price = sells.iloc[i]["price"]
+            trade_type = buys.iloc[i]["type"]
+            if trade_type == "buy" and sell_price > buy_price:
+                wins += 1
+            elif trade_type == "short" and sell_price < buy_price:
                 wins += 1
         if len(sells) > 0:
             win_rate = wins / len(sells) * 100
@@ -154,34 +272,7 @@ def print_summary(result: dict, ticker: str, strategy_name: str):
     }
 
 
-def run_backtest(name: str, ticker: str, start: str = None, end: str = None,
-                 initial_capital: float = 100000, show_plot: bool = True) -> dict:
-    """
-    Single entry point: generates signals, simulates trades,
-    prints summary, optionally plots results.
-    Returns combined results dict.
-    """
-    df = generate_signals(name, ticker, start, end)
-    result = simulate_trades(df, initial_capital)
-    metrics = print_summary(result, ticker, name)
-
-    if show_plot:
-        plot_results(df, result, ticker, name)
-
-    return {
-        "df": df,
-        "equity_curve": result["equity_curve"],
-        "trade_log": result["trade_log"],
-        "initial_capital": initial_capital,
-        "final_value": result["final_value"],
-        "metrics": metrics,
-    }
-
 def show_saved_run(run_row):
-    """
-    run_row: tuple from fetch_backtest_run
-    Reconstructs equity_curve and trade_log DataFrames and plots them.
-    """
     import json as json_module
 
     (run_id, strategy_id, data_tickers, execute_on, start_date, end_date,
@@ -198,7 +289,6 @@ def show_saved_run(run_row):
     equity_curve["date"] = pd.to_datetime(equity_curve["date"])
     equity_curve.set_index("date", inplace=True)
 
-    # Reconstruct df with close prices for benchmark
     df = get_price_data(execute_on, str(start_date), str(end_date))
 
     result = {
@@ -225,3 +315,24 @@ def show_saved_run(run_row):
     print(trade_log)
 
     plot_results(df, result, execute_on, f"strategy_{strategy_id}")
+
+
+def run_backtest(name: str, ticker: str, start: str = None, end: str = None,
+                 initial_capital: float = 100000, show_plot: bool = True,
+                 cooldown: int = 0, stop_loss: float = None, take_profit: float = None,
+                 mode: str = "long", confirm_buy: int = 1, confirm_sell: int = 1) -> dict:
+    df = generate_signals(name, ticker, start, end)
+    result = simulate_trades(df, initial_capital, cooldown, stop_loss, take_profit, mode, confirm_buy, confirm_sell)
+    metrics = print_summary(result, ticker, name)
+
+    if show_plot:
+        plot_results(df, result, ticker, name)
+
+    return {
+        "df": df,
+        "equity_curve": result["equity_curve"],
+        "trade_log": result["trade_log"],
+        "initial_capital": initial_capital,
+        "final_value": result["final_value"],
+        "metrics": metrics,
+    }
