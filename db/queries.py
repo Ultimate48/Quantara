@@ -152,3 +152,105 @@ def fetch_backtest_run(run_id: int):
     cur.close()
     conn.close()
     return row
+
+
+def update_strategy(name: str, description: str = None, columns: list = None, signal_rule: str = None) -> bool:
+    """Update a strategy by name. Only updates fields that are not None. Returns True if found."""
+    conn = get_connection()
+    cur = conn.cursor()
+
+    # Build dynamic SET clause
+    updates = []
+    params = []
+    if description is not None:
+        updates.append("description = %s")
+        params.append(description)
+    if columns is not None:
+        updates.append("columns = %s")
+        params.append(json.dumps(columns))
+    if signal_rule is not None:
+        updates.append("signal_rule = %s")
+        params.append(signal_rule)
+
+    if not updates:
+        cur.close()
+        conn.close()
+        return False
+
+    params.append(name)
+    cur.execute(f"""
+        UPDATE strategies SET {', '.join(updates)}
+        WHERE name = %s;
+    """, params)
+    updated = cur.rowcount > 0
+    conn.commit()
+    cur.close()
+    conn.close()
+    return updated
+
+
+def delete_strategy(name: str) -> dict:
+    """
+    Delete a strategy by name.
+    Returns {"deleted": True/False, "error": str or None}
+    Refuses to delete if backtest_runs reference this strategy.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+
+    # Find strategy id
+    cur.execute("SELECT id FROM strategies WHERE name = %s;", (name,))
+    row = cur.fetchone()
+    if row is None:
+        cur.close()
+        conn.close()
+        return {"deleted": False, "error": f"Strategy '{name}' not found."}
+
+    strategy_id = row[0]
+
+    # Check for dependent backtest runs
+    cur.execute("SELECT COUNT(*) FROM backtest_runs WHERE strategy_id = %s;", (strategy_id,))
+    count = cur.fetchone()[0]
+    if count > 0:
+        cur.close()
+        conn.close()
+        return {"deleted": False, "error": f"Cannot delete '{name}': {count} backtest run(s) reference it. Delete those first or use --force."}
+
+    cur.execute("DELETE FROM strategies WHERE id = %s;", (strategy_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return {"deleted": True, "error": None}
+
+
+def delete_strategy_force(name: str) -> dict:
+    """Delete a strategy and all its backtest runs."""
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("SELECT id FROM strategies WHERE name = %s;", (name,))
+    row = cur.fetchone()
+    if row is None:
+        cur.close()
+        conn.close()
+        return {"deleted": False, "error": f"Strategy '{name}' not found."}
+
+    strategy_id = row[0]
+    cur.execute("DELETE FROM backtest_runs WHERE strategy_id = %s;", (strategy_id,))
+    deleted_runs = cur.rowcount
+    cur.execute("DELETE FROM strategies WHERE id = %s;", (strategy_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return {"deleted": True, "error": None, "deleted_runs": deleted_runs}
+
+
+def ticker_exists(ticker: str) -> bool:
+    """Check if a ticker exists in the stocks table."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM stocks WHERE ticker = %s;", (ticker,))
+    exists = cur.fetchone() is not None
+    cur.close()
+    conn.close()
+    return exists

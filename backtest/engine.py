@@ -6,6 +6,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from db.queries import get_price_data
 from strategies.engine import apply_columns, apply_signal_rule, load_strategy
+from analytics.metrics import compute_metrics
 
 
 def generate_signals(name: str, ticker: str, start: str = None, end: str = None) -> pd.DataFrame:
@@ -169,7 +170,7 @@ def simulate_trades(df: pd.DataFrame, initial_capital: float = 100000, cooldown:
 
 
 def compute_benchmark(df: pd.DataFrame, initial_capital: float = 100000) -> pd.DataFrame:
-    first_price = df["close"].iloc[0]
+    first_price = float(df["close"].iloc[0])
     shares = initial_capital / first_price
     benchmark = (df["close"] * shares).to_frame(name="value")
     return benchmark
@@ -219,57 +220,70 @@ def plot_results(df: pd.DataFrame, result: dict, ticker: str, strategy_name: str
 
 
 def print_summary(result: dict, ticker: str, strategy_name: str):
+    """Compute metrics and print summary. Returns metrics dict."""
     equity_curve = result["equity_curve"]
     trade_log = result["trade_log"]
     initial_capital = result["initial_capital"]
     final_value = result["final_value"]
 
-    total_return = (final_value - initial_capital) / initial_capital * 100
-
-    daily_returns = equity_curve["value"].pct_change().dropna()
-    sharpe_ratio = (daily_returns.mean() / daily_returns.std()) * (252 ** 0.5) if daily_returns.std() != 0 else 0
-
-    cummax = equity_curve["value"].cummax()
-    drawdown = (equity_curve["value"] - cummax) / cummax
-    max_drawdown = drawdown.min() * 100
-
-    total_trades = len(trade_log)
-
-    win_rate = 0.0
-    if not trade_log.empty:
-        sells = trade_log[trade_log["type"].isin(["sell", "cover"])].reset_index(drop=True)
-        buys = trade_log[trade_log["type"].isin(["buy", "short"])].reset_index(drop=True)
-        wins = 0
-        for i in range(min(len(buys), len(sells))):
-            buy_price = buys.iloc[i]["price"]
-            sell_price = sells.iloc[i]["price"]
-            trade_type = buys.iloc[i]["type"]
-            if trade_type == "buy" and sell_price > buy_price:
-                wins += 1
-            elif trade_type == "short" and sell_price < buy_price:
-                wins += 1
-        if len(sells) > 0:
-            win_rate = wins / len(sells) * 100
+    metrics = compute_metrics(equity_curve, trade_log, initial_capital, final_value)
 
     print(f"\n{'='*50}")
     print(f"Backtest: {strategy_name} on {ticker}")
     print(f"{'='*50}")
     print(f"Initial Capital : {initial_capital:,.2f}")
     print(f"Final Value     : {final_value:,.2f}")
-    print(f"Total Return    : {total_return:.2f}%")
-    print(f"Sharpe Ratio    : {sharpe_ratio:.2f}")
-    print(f"Max Drawdown    : {max_drawdown:.2f}%")
-    print(f"Win Rate        : {win_rate:.2f}%")
-    print(f"Total Trades    : {total_trades}")
+    print(f"Total Return    : {metrics['total_return']:.2f}%")
+    print(f"Sharpe Ratio    : {metrics['sharpe_ratio']:.2f}")
+    print(f"Max Drawdown    : {metrics['max_drawdown']:.2f}%")
+    print(f"Win Rate        : {metrics['win_rate']:.2f}%")
+    print(f"Total Trades    : {metrics['total_trades']}")
     print(f"{'='*50}\n")
 
-    return {
-        "total_return": round(total_return, 2),
-        "sharpe_ratio": round(sharpe_ratio, 2),
-        "max_drawdown": round(max_drawdown, 2),
-        "win_rate": round(win_rate, 2),
-        "total_trades": total_trades,
-    }
+    return metrics
+
+
+def compare_backtests(results: list, ticker: str):
+    """
+    Print a side-by-side comparison table for multiple backtest results.
+    results: list of {"name": str, "metrics": dict, "initial_capital": float, "final_value": float}
+    """
+    if not results:
+        return
+
+    # Header
+    name_width = max(len(r["name"]) for r in results) + 2
+    print(f"\n{'='*80}")
+    print(f"Strategy Comparison on {ticker}")
+    print(f"{'='*80}")
+    print(f"{'Metric':<20}", end="")
+    for r in results:
+        print(f"{r['name']:>{name_width}}", end="")
+    print()
+    print("-" * (20 + name_width * len(results)))
+
+    # Rows
+    metric_labels = [
+        ("Initial Capital", "initial_capital", "{:,.0f}"),
+        ("Final Value", "final_value", "{:,.0f}"),
+        ("Total Return", "total_return", "{:.2f}%"),
+        ("Sharpe Ratio", "sharpe_ratio", "{:.2f}"),
+        ("Max Drawdown", "max_drawdown", "{:.2f}%"),
+        ("Win Rate", "win_rate", "{:.2f}%"),
+        ("Total Trades", "total_trades", "{}"),
+    ]
+
+    for label, key, fmt in metric_labels:
+        print(f"{label:<20}", end="")
+        for r in results:
+            if key in ("initial_capital", "final_value"):
+                val = r[key]
+            else:
+                val = r["metrics"][key]
+            print(f"{fmt.format(val):>{name_width}}", end="")
+        print()
+
+    print(f"{'='*80}\n")
 
 
 def show_saved_run(run_row):
@@ -284,19 +298,15 @@ def show_saved_run(run_row):
     if not trade_log.empty:
         trade_log["date"] = pd.to_datetime(trade_log["date"])
 
-    equity_raw = equity_curve_json if isinstance(equity_curve_json, list) else json_module.loads(equity_curve_json)
-    equity_curve = pd.DataFrame(equity_raw)
-    equity_curve["date"] = pd.to_datetime(equity_curve["date"])
-    equity_curve.set_index("date", inplace=True)
-
-    df = get_price_data(execute_on, str(start_date), str(end_date))
-
-    result = {
-        "equity_curve": equity_curve,
-        "trade_log": trade_log,
-        "final_value": final_value,
-        "initial_capital": initial_capital,
-    }
+    # Handle legacy runs where equity_curve was not stored
+    has_equity_curve = equity_curve_json is not None
+    if has_equity_curve:
+        equity_raw = equity_curve_json if isinstance(equity_curve_json, list) else json_module.loads(equity_curve_json)
+        equity_curve = pd.DataFrame(equity_raw)
+        equity_curve["date"] = pd.to_datetime(equity_curve["date"])
+        equity_curve.set_index("date", inplace=True)
+    else:
+        equity_curve = pd.DataFrame(columns=["value"])
 
     print(f"\n{'='*50}")
     print(f"Backtest Run #{run_id} — Strategy ID {strategy_id} on {execute_on}")
@@ -311,10 +321,21 @@ def show_saved_run(run_row):
     print(f"Total Trades    : {total_trades}")
     print(f"{'='*50}\n")
 
-    print("Trade log:")
-    print(trade_log)
+    if not trade_log.empty:
+        print("Trade log:")
+        print(trade_log)
 
-    plot_results(df, result, execute_on, f"strategy_{strategy_id}")
+    if has_equity_curve and not equity_curve.empty:
+        df = get_price_data(execute_on, str(start_date), str(end_date))
+        result = {
+            "equity_curve": equity_curve,
+            "trade_log": trade_log,
+            "final_value": final_value,
+            "initial_capital": initial_capital,
+        }
+        plot_results(df, result, execute_on, f"strategy_{strategy_id}")
+    else:
+        print("(No equity curve data stored — this is a legacy run.)")
 
 
 def run_backtest(name: str, ticker: str, start: str = None, end: str = None,

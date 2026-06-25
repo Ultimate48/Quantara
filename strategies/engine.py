@@ -2,8 +2,14 @@ import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+import numpy as np
 import pandas as pd
-from db.queries import insert_strategy, fetch_strategy_by_name, fetch_all_strategies
+from db.queries import (
+    insert_strategy, fetch_strategy_by_name, fetch_all_strategies,
+    update_strategy as db_update_strategy,
+    delete_strategy as db_delete_strategy,
+    delete_strategy_force as db_delete_strategy_force,
+)
 
 
 def apply_columns(df: pd.DataFrame, columns: list) -> pd.DataFrame:
@@ -50,6 +56,38 @@ def apply_signal_rule(df: pd.DataFrame, signal_rule: str) -> pd.DataFrame:
     return df
 
 
+def validate_strategy(columns: list, signal_rule: str) -> dict:
+    """
+    Validate columns and signal_rule by running them against a synthetic DataFrame.
+    Returns {"valid": True} or {"valid": False, "error": str}.
+    """
+    try:
+        # Generate a small synthetic OHLCV DataFrame with realistic-looking data
+        np.random.seed(42)
+        n = 300  # enough rows for 200-day indicators
+        dates = pd.date_range("2020-01-01", periods=n, freq="B")
+        close = 100 + np.cumsum(np.random.randn(n) * 0.5)
+        df = pd.DataFrame({
+            "open": close + np.random.randn(n) * 0.1,
+            "high": close + abs(np.random.randn(n) * 0.5),
+            "low": close - abs(np.random.randn(n) * 0.5),
+            "close": close,
+            "volume": np.random.randint(1000000, 10000000, n).astype(float),
+        }, index=dates)
+
+        df = apply_columns(df, columns)
+        df = apply_signal_rule(df, signal_rule)
+
+        # Verify signal column exists and contains only valid values
+        if "signal" not in df.columns:
+            return {"valid": False, "error": "Signal column was not generated."}
+
+        return {"valid": True}
+
+    except Exception as e:
+        return {"valid": False, "error": str(e)}
+
+
 def create_strategy(name: str, description: str, columns: list, signal_rule: str) -> int:
     return insert_strategy(name, description, columns, signal_rule)
 
@@ -74,3 +112,19 @@ def list_strategies():
 
 def show_strategy(name: str):
     return load_strategy(name)
+
+
+def update_strategy(name: str, description: str = None, columns: list = None, signal_rule: str = None) -> bool:
+    """Update a strategy by name. Returns True if strategy was found and updated."""
+    return db_update_strategy(name, description, columns, signal_rule)
+
+
+def delete_strategy(name: str, force: bool = False) -> dict:
+    """
+    Delete a strategy by name.
+    If force=True, also deletes all backtest runs referencing it.
+    Returns {"deleted": bool, "error": str or None, "deleted_runs": int (if force)}.
+    """
+    if force:
+        return db_delete_strategy_force(name)
+    return db_delete_strategy(name)

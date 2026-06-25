@@ -63,6 +63,8 @@ def init_db():
             max_drawdown NUMERIC,
             win_rate NUMERIC,
             total_trades INTEGER,
+            trade_log JSONB,
+            equity_curve JSONB,
             run_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)
