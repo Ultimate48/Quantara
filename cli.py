@@ -97,24 +97,50 @@ def main():
     backtest_parser = subparsers.add_parser("backtest", help="Run and view backtests")
     backtest_subparsers = backtest_parser.add_subparsers(dest="backtest_command")
 
+    # ── shared backtest flags (used by both 'run' and 'walk-forward') ──
+    def _add_common_backtest_args(p):
+        p.add_argument("--strategy", type=str, required=True)
+        p.add_argument("--ticker", type=str, required=True)
+        p.add_argument("--start", type=str, default=None)
+        p.add_argument("--end", type=str, default=None)
+        p.add_argument("--capital", type=float, default=100000)
+        p.add_argument("--cooldown", type=int, default=0, help="Cooldown days after a sell")
+        p.add_argument("--stop-loss", type=float, default=None, help="Stop loss e.g. 0.05 for 5%%")
+        p.add_argument("--take-profit", type=float, default=None, help="Take profit e.g. 0.15 for 15%%")
+        p.add_argument("--short-only", action="store_true", help="Only take short positions")
+        p.add_argument("--long-short", action="store_true", help="Take both long and short positions")
+        p.add_argument("--confirm", type=int, default=None, help="Confirmation days for both buy and sell signals")
+        p.add_argument("--confirm-buy", type=int, default=None, help="Confirmation days for buy signal")
+        p.add_argument("--confirm-sell", type=int, default=None, help="Confirmation days for sell signal")
+        # Batch 2 — new flags
+        p.add_argument("--position-size", type=str, default="all",
+                       help="Position sizing: 'all' (default), 'fixed:50000', 'pct:50', 'volatility:14'")
+        p.add_argument("--transaction-cost", type=float, default=0.0,
+                       help="Transaction cost fraction per trade e.g. 0.001 for 0.1%%")
+        p.add_argument("--slippage", type=float, default=0.0,
+                       help="Slippage fraction e.g. 0.001 for 0.1%%")
+
     # backtest run
     backtest_run = backtest_subparsers.add_parser("run", help="Run a backtest")
-    backtest_run.add_argument("--strategy", type=str, required=True)
-    backtest_run.add_argument("--ticker", type=str, required=True)
-    backtest_run.add_argument("--start", type=str, default=None)
-    backtest_run.add_argument("--end", type=str, default=None)
-    backtest_run.add_argument("--capital", type=float, default=100000)
+    _add_common_backtest_args(backtest_run)
     backtest_run.add_argument("--no-plot", action="store_true", help="Skip showing the plot")
-    backtest_run.add_argument("--cooldown", type=int, default=0, help="Cooldown days after a sell")
-    backtest_run.add_argument("--stop-loss", type=float, default=None, help="Stop loss e.g. 0.05 for 5 percent")
-    backtest_run.add_argument("--take-profit", type=float, default=None, help="Take profit e.g. 0.15 for 15 percent")
-    backtest_run.add_argument("--short-only", action="store_true", help="Only take short positions")
-    backtest_run.add_argument("--long-short", action="store_true", help="Take both long and short positions")
-    backtest_run.add_argument("--confirm", type=int, default=None, help="Confirmation days for both buy and sell signals")
-    backtest_run.add_argument("--confirm-buy", type=int, default=None, help="Confirmation days for buy signal")
-    backtest_run.add_argument("--confirm-sell", type=int, default=None, help="Confirmation days for sell signal")
     backtest_run.add_argument("--compare", type=str, default=None,
                                help="Compare with another strategy (runs both, prints side-by-side metrics)")
+    # Batch 2 — analysis flags
+    backtest_run.add_argument("--monte-carlo", type=int, default=None, metavar="N",
+                               help="Run N Monte Carlo simulations after the backtest")
+    backtest_run.add_argument("--regime", action="store_true",
+                               help="Run regime detection analysis after the backtest")
+    backtest_run.add_argument("--correlation", action="store_true",
+                               help="Run correlation analysis vs buy-and-hold after the backtest")
+
+    # backtest walk-forward
+    backtest_wf = backtest_subparsers.add_parser("walk-forward", help="Run a walk-forward test")
+    _add_common_backtest_args(backtest_wf)
+    backtest_wf.add_argument("--train-days", type=int, default=252,
+                              help="Training / warm-up window in calendar days (default: 252)")
+    backtest_wf.add_argument("--test-days", type=int, default=63,
+                              help="Test window in calendar days (default: 63 ≈ 1 quarter)")
 
     # backtest show
     backtest_show = backtest_subparsers.add_parser("show", help="Show a saved backtest run")
@@ -122,7 +148,9 @@ def main():
 
     args = parser.parse_args()
 
-    # ── handlers ──
+    # ──────────────────────────────────────────────────────────────────────────
+    # Handlers
+    # ──────────────────────────────────────────────────────────────────────────
 
     if args.command == "fetch":
         fetch_and_store(args.ticker, args.start, args.end, args.interval)
@@ -174,7 +202,6 @@ def main():
 
     elif args.command == "strategy":
         if args.strategy_command == "create":
-            # Expand indicator presets
             indicator_columns = []
             if args.indicators:
                 for ind_str in args.indicators:
@@ -184,24 +211,19 @@ def main():
                         print_error(str(e))
                         return
 
-            # Parse user-defined columns
             user_columns = parse_columns(args.columns)
-
-            # Combine: indicator presets first, then user columns
             all_columns = indicator_columns + user_columns
 
             if not all_columns:
                 print_error("No columns defined. Use --column or --indicator to define at least one computed column.")
                 return
 
-            # Validate formulas before saving
             validation = validate_strategy(all_columns, args.signal)
             if not validation["valid"]:
                 print_error(f"Strategy validation failed: {validation['error']}")
                 print_info("Fix your column formulas or signal rule and try again.")
                 return
 
-            # Check for duplicate name
             try:
                 strategy_id = create_strategy(args.name, args.description, all_columns, args.signal)
                 print_success(f"Strategy '{args.name}' created with id {strategy_id}")
@@ -213,13 +235,11 @@ def main():
                     print_error(f"Failed to create strategy: {error_msg}")
 
         elif args.strategy_command == "update":
-            # Check strategy exists
             existing = show_strategy(args.name)
             if existing is None:
                 print_error(f"Strategy '{args.name}' not found.")
                 return
 
-            # Build new columns if provided
             new_columns = None
             if args.columns or args.indicators:
                 indicator_columns = []
@@ -233,7 +253,6 @@ def main():
                 user_columns = parse_columns(args.columns)
                 new_columns = indicator_columns + user_columns
 
-            # Determine what to validate
             validate_cols = new_columns if new_columns is not None else existing["columns"]
             validate_signal = args.signal if args.signal is not None else existing["signal_rule"]
 
@@ -287,13 +306,13 @@ def main():
             strategy_parser.print_help()
 
     elif args.command == "backtest":
+
+        # ── backtest run ──────────────────────────────────────────────────────
         if args.backtest_command == "run":
-            # Validate ticker exists in DB
             if not ticker_exists(args.ticker):
                 print_error(f"Ticker '{args.ticker}' not found in database. Run 'python cli.py fetch {args.ticker}' first.")
                 return
 
-            # Validate strategy exists
             strategy = show_strategy(args.strategy)
             if strategy is None:
                 print_error(f"Strategy '{args.strategy}' not found. Run 'python cli.py strategy list' to see available strategies.")
@@ -324,7 +343,10 @@ def main():
                 take_profit=args.take_profit,
                 mode=mode,
                 confirm_buy=confirm_buy,
-                confirm_sell=confirm_sell
+                confirm_sell=confirm_sell,
+                position_size=args.position_size,
+                transaction_cost=args.transaction_cost,
+                slippage=args.slippage,
             )
 
             equity_curve = result["equity_curve"]
@@ -384,7 +406,10 @@ def main():
                         take_profit=args.take_profit,
                         mode=mode,
                         confirm_buy=confirm_buy,
-                        confirm_sell=confirm_sell
+                        confirm_sell=confirm_sell,
+                        position_size=args.position_size,
+                        transaction_cost=args.transaction_cost,
+                        slippage=args.slippage,
                     )
                     comparison = [
                         {
@@ -402,6 +427,94 @@ def main():
                     ]
                     print_comparison(comparison, args.ticker)
 
+            # ── Monte Carlo ──
+            if args.monte_carlo and args.monte_carlo > 0:
+                from backtest.monte_carlo import run_monte_carlo, print_monte_carlo
+                print_info(f"Running {args.monte_carlo:,} Monte Carlo simulations...")
+                mc_result = run_monte_carlo(
+                    trade_log=result["trade_log"],
+                    initial_capital=args.capital,
+                    n_simulations=args.monte_carlo,
+                    show_plot=not args.no_plot,
+                )
+                print_monte_carlo(mc_result)
+
+            # ── Regime analysis ──
+            if args.regime:
+                from analytics.regime import detect_regime, analyze_by_regime, print_regime_analysis
+                print_info("Running regime analysis...")
+                regime_series = detect_regime(result["df"])
+                regime_results = analyze_by_regime(
+                    result["equity_curve"],
+                    result["trade_log"],
+                    regime_series,
+                    args.capital,
+                )
+                print_regime_analysis(regime_results, args.ticker, args.strategy)
+
+            # ── Correlation analysis ──
+            if args.correlation:
+                from backtest.engine import compute_benchmark
+                from analytics.correlation import analyze_correlation, print_correlation
+                print_info("Running correlation analysis...")
+                benchmark = compute_benchmark(result["df"], args.capital)
+                corr_result = analyze_correlation(result["equity_curve"], benchmark)
+                print_correlation(corr_result, args.ticker, args.strategy,
+                                  show_plot=not args.no_plot)
+
+        # ── backtest walk-forward ─────────────────────────────────────────────
+        elif args.backtest_command == "walk-forward":
+            if not ticker_exists(args.ticker):
+                print_error(f"Ticker '{args.ticker}' not found in database. Run 'python cli.py fetch {args.ticker}' first.")
+                return
+
+            strategy = show_strategy(args.strategy)
+            if strategy is None:
+                print_error(f"Strategy '{args.strategy}' not found. Run 'python cli.py strategy list' to see available strategies.")
+                return
+
+            mode = "long"
+            if args.long_short:
+                mode = "long_short"
+            elif args.short_only:
+                mode = "short"
+
+            confirm_buy = args.confirm if args.confirm is not None else 1
+            confirm_sell = args.confirm if args.confirm is not None else 1
+            if args.confirm_buy is not None:
+                confirm_buy = args.confirm_buy
+            if args.confirm_sell is not None:
+                confirm_sell = args.confirm_sell
+
+            print_info(
+                f"Running walk-forward test: train={args.train_days}d, test={args.test_days}d ..."
+            )
+
+            from backtest.walk_forward import run_walk_forward, print_walk_forward
+            try:
+                wf_result = run_walk_forward(
+                    name=args.strategy,
+                    ticker=args.ticker,
+                    train_days=args.train_days,
+                    test_days=args.test_days,
+                    start=args.start,
+                    end=args.end,
+                    initial_capital=args.capital,
+                    cooldown=args.cooldown,
+                    stop_loss=args.stop_loss,
+                    take_profit=args.take_profit,
+                    mode=mode,
+                    confirm_buy=confirm_buy,
+                    confirm_sell=confirm_sell,
+                    position_size=args.position_size,
+                    transaction_cost=args.transaction_cost,
+                    slippage=args.slippage,
+                )
+                print_walk_forward(wf_result)
+            except ValueError as e:
+                print_error(str(e))
+
+        # ── backtest show ─────────────────────────────────────────────────────
         elif args.backtest_command == "show":
             run_row = fetch_backtest_run(args.id)
             if run_row is None:

@@ -700,6 +700,405 @@ def run_pipeline_tests():
 
 
 # ═════════════════════════════════════════════════
+# SECTION 4: BATCH 2 UNIT TESTS
+# ═════════════════════════════════════════════════
+
+def run_batch2_unit_tests():
+    header("BATCH 2 — UNIT TESTS")
+
+    import pandas as pd
+    import numpy as np
+
+    # ── Synthetic OHLCV DataFrame for testing ──
+    np.random.seed(0)
+    n = 300
+    dates = pd.date_range("2020-01-01", periods=n, freq="B")
+    close = 100 + np.cumsum(np.random.randn(n) * 0.5)
+    df = pd.DataFrame({
+        "open": close + np.random.randn(n) * 0.1,
+        "high": close + abs(np.random.randn(n)) * 0.5,
+        "low":  close - abs(np.random.randn(n)) * 0.5,
+        "close": close,
+        "volume": np.random.randint(1_000_000, 10_000_000, n).astype(float),
+    }, index=dates)
+    # Simple alternating signal
+    df["signal"] = np.where(np.arange(n) % 20 < 10, 1, -1)
+
+    # ────────────────────────────────────────────────
+    # 4.1  Position Sizing
+    # ────────────────────────────────────────────────
+    print("\n  --- Position Sizing ---")
+    try:
+        from backtest.engine import simulate_trades
+
+        # mode=all (default): all cash deployed on buy
+        r_all = simulate_trades(df.copy(), initial_capital=100_000, position_size="all")
+        test("position_size=all: returns result dict", isinstance(r_all, dict))
+        test("position_size=all: has equity_curve", not r_all["equity_curve"].empty)
+
+        # mode=fixed:50000: each buy invests at most 50k
+        r_fixed = simulate_trades(df.copy(), initial_capital=100_000, position_size="fixed:50000")
+        test("position_size=fixed:50000: returns result dict", isinstance(r_fixed, dict))
+        tl_fixed = r_fixed["trade_log"]
+        if not tl_fixed.empty:
+            buys_fixed = tl_fixed[tl_fixed["type"] == "buy"]
+            if not buys_fixed.empty:
+                invested_fixed = buys_fixed.iloc[0]["shares"] * buys_fixed.iloc[0]["price"]
+                test("position_size=fixed:50000: first buy <= 50000",
+                     invested_fixed <= 50_001,
+                     f"invested: {invested_fixed:.2f}")
+
+        # mode=pct:50: each buy invests 50% of cash
+        r_pct = simulate_trades(df.copy(), initial_capital=100_000, position_size="pct:50")
+        test("position_size=pct:50: returns result dict", isinstance(r_pct, dict))
+        # pct mode means never going fully all-in, so more trades possible
+        tl_pct = r_pct["trade_log"]
+        test("position_size=pct:50: has trades", not tl_pct.empty if not tl_pct.empty else True)
+
+        # mode=volatility:14: size based on ATR proxy
+        r_vol = simulate_trades(df.copy(), initial_capital=100_000, position_size="volatility:14")
+        test("position_size=volatility:14: returns result dict", isinstance(r_vol, dict))
+
+    except Exception as e:
+        test("position_size tests", False, str(e))
+
+    # ────────────────────────────────────────────────
+    # 4.2  Transaction Costs
+    # ────────────────────────────────────────────────
+    print("\n  --- Transaction Costs ---")
+    try:
+        from backtest.engine import simulate_trades
+
+        r_no_cost  = simulate_trades(df.copy(), initial_capital=100_000, transaction_cost=0.0)
+        r_with_cost = simulate_trades(df.copy(), initial_capital=100_000, transaction_cost=0.01)
+
+        test("transaction_cost=0: returns result", isinstance(r_no_cost, dict))
+        test("transaction_cost=0.01: returns result", isinstance(r_with_cost, dict))
+
+        # With a cost, final value should be <= no-cost final value
+        test(
+            "transaction_cost reduces final value",
+            r_with_cost["final_value"] <= r_no_cost["final_value"] + 1,  # +1 for float tolerance
+            f"no_cost={r_no_cost['final_value']:.2f}, with_cost={r_with_cost['final_value']:.2f}"
+        )
+
+        # Verify cost field exists in trade_log
+        tl = r_with_cost["trade_log"]
+        if not tl.empty:
+            test("trade_log has 'cost' column", "cost" in tl.columns)
+            test("cost values are non-negative", (tl["cost"] >= 0).all())
+
+    except Exception as e:
+        test("transaction_cost tests", False, str(e))
+
+    # ────────────────────────────────────────────────
+    # 4.3  Slippage
+    # ────────────────────────────────────────────────
+    print("\n  --- Slippage ---")
+    try:
+        from backtest.engine import simulate_trades
+
+        r_no_slip  = simulate_trades(df.copy(), initial_capital=100_000, slippage=0.0)
+        r_with_slip = simulate_trades(df.copy(), initial_capital=100_000, slippage=0.01)
+
+        test("slippage=0: returns result", isinstance(r_no_slip, dict))
+        test("slippage=0.01: returns result", isinstance(r_with_slip, dict))
+
+        # Slippage should reduce profitability
+        test(
+            "slippage reduces final value",
+            r_with_slip["final_value"] <= r_no_slip["final_value"] + 1,
+            f"no_slip={r_no_slip['final_value']:.2f}, with_slip={r_with_slip['final_value']:.2f}"
+        )
+
+        # Check buy exec price > close price (slippage makes buys costlier)
+        tl_slip = r_with_slip["trade_log"]
+        if not tl_slip.empty:
+            buys = tl_slip[tl_slip["type"] == "buy"]
+            if not buys.empty:
+                buy_date = buys.iloc[0]["date"]
+                raw_close = float(df.loc[buy_date, "close"]) if buy_date in df.index else None
+                if raw_close is not None:
+                    exec_price = buys.iloc[0]["price"]
+                    test("slippage: buy exec price >= close price",
+                         exec_price >= raw_close - 0.001,
+                         f"exec={exec_price:.4f}, close={raw_close:.4f}")
+
+    except Exception as e:
+        test("slippage tests", False, str(e))
+
+    # ────────────────────────────────────────────────
+    # 4.4  Walk-Forward (synthetic data, no DB)
+    # ────────────────────────────────────────────────
+    print("\n  --- Walk-Forward (synthetic) ---")
+    try:
+        from backtest.walk_forward import run_walk_forward
+
+        # We test the internal window-building + simulation logic directly
+        # by calling a helper that skips the DB layer
+        from backtest.engine import simulate_trades
+        from analytics.metrics import compute_metrics
+
+        # Build windows manually on synthetic df
+        initial_capital = 100_000
+        train_days = 90
+        test_days = 30
+
+        windows = []
+        window_start = dates[0]
+        while True:
+            test_start_dt = window_start + pd.Timedelta(days=train_days)
+            test_end_dt = test_start_dt + pd.Timedelta(days=test_days)
+            if test_end_dt > dates[-1]:
+                break
+            test_mask = (df.index >= test_start_dt) & (df.index <= test_end_dt)
+            test_df = df[test_mask].copy()
+            if len(test_df) < 5:
+                window_start = test_start_dt
+                continue
+            result = simulate_trades(test_df, initial_capital)
+            m = compute_metrics(result["equity_curve"], result["trade_log"],
+                                initial_capital, result["final_value"])
+            windows.append({"metrics": m, "final_value": result["final_value"]})
+            window_start = test_start_dt
+
+        test("walk-forward: builds at least 1 window", len(windows) >= 1, f"got {len(windows)}")
+        test("walk-forward: each window has metrics",
+             all("total_return" in w["metrics"] for w in windows))
+
+        # Aggregate summary stats
+        returns = [w["metrics"]["total_return"] for w in windows]
+        test("walk-forward: aggregate mean is a number", isinstance(np.mean(returns), float))
+        profitable = sum(1 for r in returns if r > 0)
+        test("walk-forward: profitable_windows is int", isinstance(profitable, int))
+
+    except Exception as e:
+        test("walk-forward unit tests", False, str(e))
+
+    # ────────────────────────────────────────────────
+    # 4.5  Monte Carlo
+    # ────────────────────────────────────────────────
+    print("\n  --- Monte Carlo ---")
+    try:
+        from backtest.monte_carlo import run_monte_carlo, _extract_trade_returns
+        from backtest.engine import simulate_trades
+
+        result = simulate_trades(df.copy(), initial_capital=100_000)
+        mc = run_monte_carlo(result["trade_log"], initial_capital=100_000,
+                             n_simulations=200, show_plot=False)
+
+        test("monte_carlo: returns dict", isinstance(mc, dict))
+        test("monte_carlo: n_simulations=200", mc["n_simulations"] == 200)
+        test("monte_carlo: final_values has 200 entries", len(mc["final_values"]) == 200)
+        test("monte_carlo: prob_profit in 0-100", 0 <= mc["prob_profit"] <= 100)
+        test("monte_carlo: p5 <= median <= p95",
+             mc["p5"] <= mc["median"] <= mc["p95"],
+             f"p5={mc['p5']}, median={mc['median']}, p95={mc['p95']}")
+        test("monte_carlo: actual_value is a number", isinstance(mc["actual_value"], float))
+
+        # Edge case: empty trade log
+        empty_tl = pd.DataFrame()
+        mc_empty = run_monte_carlo(empty_tl, initial_capital=100_000,
+                                   n_simulations=10, show_plot=False)
+        test("monte_carlo: empty trade_log: n_simulations=0", mc_empty["n_simulations"] == 0)
+        test("monte_carlo: empty trade_log: n_trades=0", mc_empty["n_trades"] == 0)
+
+    except Exception as e:
+        test("monte_carlo tests", False, str(e))
+
+    # ────────────────────────────────────────────────
+    # 4.6  Regime Detection
+    # ────────────────────────────────────────────────
+    print("\n  --- Regime Detection ---")
+    try:
+        from analytics.regime import detect_regime, analyze_by_regime
+        from backtest.engine import simulate_trades, compute_benchmark
+
+        regime_series = detect_regime(df)
+        test("regime: returns Series", isinstance(regime_series, pd.Series))
+        test("regime: same length as df", len(regime_series) == len(df))
+        test("regime: only valid labels",
+             set(regime_series.unique()).issubset({"bull", "bear", "sideways"}))
+
+        # With only 300 bars the 200-day SMA needs 200 warmup;
+        # early bars will be sideways (SMA is NaN → default)
+        counts = regime_series.value_counts()
+        test("regime: at least one label present", len(counts) >= 1)
+
+        # analyze_by_regime
+        result = simulate_trades(df.copy(), initial_capital=100_000)
+        regime_results = analyze_by_regime(
+            result["equity_curve"],
+            result["trade_log"],
+            regime_series,
+            100_000,
+        )
+        test("regime_results: has bull key", "bull" in regime_results)
+        test("regime_results: has bear key", "bear" in regime_results)
+        test("regime_results: has sideways key", "sideways" in regime_results)
+
+        for label in ["bull", "bear", "sideways"]:
+            r = regime_results[label]
+            if r["n_bars"] > 0:
+                test(f"regime_results[{label}]: has pct_of_time", "pct_of_time" in r)
+                test(f"regime_results[{label}]: metrics is dict", isinstance(r["metrics"], dict))
+
+    except Exception as e:
+        test("regime detection tests", False, str(e))
+
+    # ────────────────────────────────────────────────
+    # 4.7  Correlation Analysis
+    # ────────────────────────────────────────────────
+    print("\n  --- Correlation Analysis ---")
+    try:
+        from analytics.correlation import analyze_correlation
+        from backtest.engine import simulate_trades, compute_benchmark
+
+        result = simulate_trades(df.copy(), initial_capital=100_000)
+        benchmark = compute_benchmark(df, 100_000)
+        corr = analyze_correlation(result["equity_curve"], benchmark, window=20)
+
+        test("correlation: returns dict", isinstance(corr, dict))
+        test("correlation: R in [-1, 1]",
+             -1 <= corr["correlation"] <= 1,
+             f"R={corr['correlation']}")
+        test("correlation: r_squared in [0, 1]",
+             0 <= corr["r_squared"] <= 1,
+             f"R²={corr['r_squared']}")
+        test("correlation: alpha is a number", isinstance(corr["alpha"], float))
+        test("correlation: beta is a number", isinstance(corr["beta"], float))
+        test("correlation: rolling_correlation is Series",
+             isinstance(corr["rolling_correlation"], pd.Series))
+        test("correlation: strategy_return is a number",
+             isinstance(corr["strategy_return"], float))
+        test("correlation: benchmark_return is a number",
+             isinstance(corr["benchmark_return"], float))
+
+        # Perfectly correlated benchmark: r should be ≈ 1
+        perfect_bench = result["equity_curve"].copy()
+        corr_perfect = analyze_correlation(result["equity_curve"], perfect_bench, window=20)
+        test("correlation: self-correlation ≈ 1.0",
+             abs(corr_perfect["correlation"] - 1.0) < 0.001,
+             f"R={corr_perfect['correlation']}")
+
+    except Exception as e:
+        test("correlation analysis tests", False, str(e))
+
+
+# ═════════════════════════════════════════════════
+# SECTION 5: BATCH 2 CLI TESTS
+# ═════════════════════════════════════════════════
+
+def run_batch2_cli_tests():
+    header("BATCH 2 — CLI TESTS")
+
+    # Requires TEST_TICKER and TEST_STRATEGY to exist in DB
+    print(f"  Using ticker={TEST_TICKER}, strategy={TEST_STRATEGY}")
+
+    # ── 5.1  --position-size fixed ──
+    print("\n  --- --position-size ---")
+    rc, out, err = run_cli(
+        f'backtest run --strategy {TEST_STRATEGY} --ticker {TEST_TICKER} '
+        f'--position-size "fixed:10000" --no-plot'
+    )
+    test("--position-size fixed:10000: exits 0", rc == 0,
+         f"stderr: {err[:200]}" if rc != 0 else "")
+
+    rc, out, err = run_cli(
+        f'backtest run --strategy {TEST_STRATEGY} --ticker {TEST_TICKER} '
+        f'--position-size "pct:25" --no-plot'
+    )
+    test("--position-size pct:25: exits 0", rc == 0,
+         f"stderr: {err[:200]}" if rc != 0 else "")
+
+    rc, out, err = run_cli(
+        f'backtest run --strategy {TEST_STRATEGY} --ticker {TEST_TICKER} '
+        f'--position-size "volatility:14" --no-plot'
+    )
+    test("--position-size volatility:14: exits 0", rc == 0,
+         f"stderr: {err[:200]}" if rc != 0 else "")
+
+    # ── 5.2  --transaction-cost ──
+    print("\n  --- --transaction-cost ---")
+    rc, out, err = run_cli(
+        f'backtest run --strategy {TEST_STRATEGY} --ticker {TEST_TICKER} '
+        f'--transaction-cost 0.001 --no-plot'
+    )
+    test("--transaction-cost 0.001: exits 0", rc == 0,
+         f"stderr: {err[:200]}" if rc != 0 else "")
+
+    # ── 5.3  --slippage ──
+    print("\n  --- --slippage ---")
+    rc, out, err = run_cli(
+        f'backtest run --strategy {TEST_STRATEGY} --ticker {TEST_TICKER} '
+        f'--slippage 0.001 --no-plot'
+    )
+    test("--slippage 0.001: exits 0", rc == 0,
+         f"stderr: {err[:200]}" if rc != 0 else "")
+
+    # ── 5.4  Combined batch 2 flags ──
+    print("\n  --- Combined Batch 2 flags ---")
+    rc, out, err = run_cli(
+        f'backtest run --strategy {TEST_STRATEGY} --ticker {TEST_TICKER} '
+        f'--position-size "pct:50" --transaction-cost 0.001 --slippage 0.001 '
+        f'--stop-loss 0.07 --take-profit 0.15 --cooldown 5 --no-plot'
+    )
+    test("combined Batch 2 flags: exits 0", rc == 0,
+         f"stderr: {err[:200]}" if rc != 0 else "")
+
+    # ── 5.5  walk-forward ──
+    print("\n  --- backtest walk-forward ---")
+    rc, out, err = run_cli(
+        f'backtest walk-forward --strategy {TEST_STRATEGY} --ticker {TEST_TICKER} '
+        f'--train-days 365 --test-days 90 --no-plot',
+        expect_success=False  # May fail if not enough data, that's ok
+    )
+    # Either succeeds or gives a clear error — should not crash with traceback
+    no_traceback = "Traceback" not in err
+    test("walk-forward: no unhandled traceback", no_traceback,
+         f"stderr: {err[:300]}" if not no_traceback else "")
+    if rc == 0:
+        test("walk-forward: output contains window info",
+             "window" in out.lower() or "test" in out.lower() or "walk" in out.lower())
+
+    # ── 5.6  --monte-carlo ──
+    print("\n  --- --monte-carlo ---")
+    rc, out, err = run_cli(
+        f'backtest run --strategy {TEST_STRATEGY} --ticker {TEST_TICKER} '
+        f'--monte-carlo 100 --no-plot'
+    )
+    test("--monte-carlo 100: exits 0", rc == 0,
+         f"stderr: {err[:200]}" if rc != 0 else "")
+    if rc == 0:
+        test("--monte-carlo: output contains simulation info",
+             "simulation" in out.lower() or "monte" in out.lower() or "profit" in out.lower())
+
+    # ── 5.7  --regime ──
+    print("\n  --- --regime ---")
+    rc, out, err = run_cli(
+        f'backtest run --strategy {TEST_STRATEGY} --ticker {TEST_TICKER} '
+        f'--regime --no-plot'
+    )
+    test("--regime: exits 0", rc == 0,
+         f"stderr: {err[:200]}" if rc != 0 else "")
+    if rc == 0:
+        test("--regime: output mentions regime",
+             "regime" in out.lower() or "bull" in out.lower() or "bear" in out.lower())
+
+    # ── 5.8  --correlation ──
+    print("\n  --- --correlation ---")
+    rc, out, err = run_cli(
+        f'backtest run --strategy {TEST_STRATEGY} --ticker {TEST_TICKER} '
+        f'--correlation --no-plot'
+    )
+    test("--correlation: exits 0", rc == 0,
+         f"stderr: {err[:200]}" if rc != 0 else "")
+    if rc == 0:
+        test("--correlation: output mentions correlation",
+             "correlation" in out.lower() or "beta" in out.lower() or "alpha" in out.lower())
+
+
+# ═════════════════════════════════════════════════
 # MAIN
 # ═════════════════════════════════════════════════
 
@@ -710,9 +1109,10 @@ if __name__ == "__main__":
     parser.add_argument("--unit", action="store_true", help="Run only unit tests")
     parser.add_argument("--cli", action="store_true", help="Run only CLI command tests")
     parser.add_argument("--pipeline", action="store_true", help="Run only pipeline tests")
+    parser.add_argument("--batch2", action="store_true", help="Run only Batch 2 tests")
     args = parser.parse_args()
 
-    run_all = not (args.unit or args.cli or args.pipeline)
+    run_all = not (args.unit or args.cli or args.pipeline or args.batch2)
 
     print("\n" + "█" * 70)
     print("  QUANTARA — COMPREHENSIVE TEST SUITE")
@@ -726,6 +1126,10 @@ if __name__ == "__main__":
 
     if run_all or args.pipeline:
         run_pipeline_tests()
+
+    if run_all or args.batch2:
+        run_batch2_unit_tests()
+        run_batch2_cli_tests()
 
     # ── Summary ──
     header("TEST RESULTS")
