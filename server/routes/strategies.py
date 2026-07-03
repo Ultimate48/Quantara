@@ -6,8 +6,14 @@ from strategies.engine import (
     update_strategy, delete_strategy, validate_strategy
 )
 from strategies.indicators import list_indicators
+from strategies.templates import list_templates
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
+
+@router.get("/templates")
+def get_strategy_templates():
+    """Return all pre-built strategy templates for the Template Gallery."""
+    return list_templates()
 
 @router.get("/", response_model=List[StrategyOut])
 def get_all_strategies():
