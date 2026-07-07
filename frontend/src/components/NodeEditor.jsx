@@ -55,6 +55,7 @@ export default function NodeEditor({ stratCols, setStratCols, stratSignal, setSt
   const [draggingNode, setDraggingNode] = useState(null);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const [connecting, setConnecting] = useState(null); // { nodeId, portName, portType: 'output' }
+  const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   const canvasRef = useRef(null);
 
   // ——— Node CRUD ———
@@ -96,11 +97,18 @@ export default function NodeEditor({ stratCols, setStratCols, stratSignal, setSt
   };
 
   const handleCanvasMouseMove = useCallback((e) => {
-    if (!draggingNode || !canvasRef.current) return;
+    if (!canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
-    const x = Math.max(0, e.clientX - rect.left - dragOffset.x);
-    const y = Math.max(0, e.clientY - rect.top - dragOffset.y);
-    setNodes(prev => prev.map(n => n.id === draggingNode ? { ...n, x, y } : n));
+    const rawX = e.clientX - rect.left;
+    const rawY = e.clientY - rect.top;
+    
+    setMousePos({ x: rawX, y: rawY });
+    
+    if (draggingNode) {
+      const x = Math.max(0, rawX - dragOffset.x);
+      const y = Math.max(0, rawY - dragOffset.y);
+      setNodes(prev => prev.map(n => n.id === draggingNode ? { ...n, x, y } : n));
+    }
   }, [draggingNode, dragOffset]);
 
   const handleCanvasMouseUp = useCallback(() => {
@@ -121,31 +129,44 @@ export default function NodeEditor({ stratCols, setStratCols, stratSignal, setSt
 
   const handlePortClick = (nodeId, portName, portType) => {
     if (!connecting) {
-      if (portType === 'output') {
-        setConnecting({ nodeId, portName, portType: 'output' });
-      }
+      setConnecting({ nodeId, portName, portType });
       return;
     }
 
     // Complete the connection
+    let fromNode, toNode;
     if (connecting.portType === 'output' && portType === 'input') {
-      // Check for duplicate
-      const exists = connections.some(c =>
-        c.from.nodeId === connecting.nodeId && c.from.port === connecting.portName &&
-        c.to.nodeId === nodeId && c.to.port === portName
-      );
-      // Check same node
-      if (connecting.nodeId === nodeId) {
-        setConnecting(null);
-        return;
-      }
-      if (!exists) {
-        // Remove any existing connection to this input port
-        setConnections(prev => [
-          ...prev.filter(c => !(c.to.nodeId === nodeId && c.to.port === portName)),
-          { from: { nodeId: connecting.nodeId, port: connecting.portName }, to: { nodeId, port: portName } },
-        ]);
-      }
+      fromNode = { nodeId: connecting.nodeId, port: connecting.portName };
+      toNode = { nodeId, port: portName };
+    } else if (connecting.portType === 'input' && portType === 'output') {
+      fromNode = { nodeId, port: portName };
+      toNode = { nodeId: connecting.nodeId, port: connecting.portName };
+    } else {
+      // invalid connection (e.g., output to output)
+      setConnecting(null);
+      return;
+    }
+
+    // Check same node
+    if (fromNode.nodeId === toNode.nodeId) {
+      setConnecting(null);
+      return;
+    }
+
+    // Check for duplicate
+    const exists = connections.some(c =>
+      c.from.nodeId === fromNode.nodeId && c.from.port === fromNode.port &&
+      c.to.nodeId === toNode.nodeId && c.to.port === toNode.port
+    );
+    
+    if (!exists) {
+      // Remove any existing connection to this input port
+      setConnections(prev => [
+        ...prev.filter(c => !(c.to.nodeId === toNode.nodeId && c.to.port === toNode.port)),
+        { from: fromNode, to: toNode },
+      ]);
+      // (Optional) you can add a short subtle sound or leave this out to avoid spam,
+      // but showing a tiny log helps debug if the state actually committed.
     }
     setConnecting(null);
   };
@@ -178,19 +199,29 @@ export default function NodeEditor({ stratCols, setStratCols, stratSignal, setSt
     const typeDef = NODE_TYPES[node.type];
     if (!typeDef) return { x: 0, y: 0 };
 
-    const nodeWidth = 160;
-    const headerHeight = 32;
-    const bodyHeight = typeDef.params.length * 28 + (typeDef.params.length > 0 ? 16 : 8);
-    const portsY = node.y + headerHeight + bodyHeight + 12;
+    // Node layout constants matching CSS
+    const nodeWidth = 150; // min-width of .editor-node + some padding
+    let height = 32; // node-header
+    if (typeDef.params.length > 0) {
+      height += 16 + typeDef.params.length * 28; // node-body padding + params
+    }
+    height += 15; // middle of node-ports container
 
+    const y = node.y + height;
+    
+    // x positions: padding is 0.7rem (11px). Gap is 0.75rem (12px).
+    // Port width is 12px.
     if (portType === 'output' || typeDef.outputs.includes(portName)) {
       const idx = typeDef.outputs.indexOf(portName);
-      const spacing = nodeWidth / (typeDef.outputs.length + 1);
-      return { x: node.x + spacing * (idx + 1), y: portsY };
+      // Outputs are right-aligned
+      const totalOutputs = typeDef.outputs.length;
+      const x = node.x + nodeWidth - 11 - 6 - (totalOutputs - 1 - idx) * 24;
+      return { x, y };
     } else {
       const idx = typeDef.inputs.indexOf(portName);
-      const spacing = nodeWidth / (typeDef.inputs.length + 1);
-      return { x: node.x + spacing * (idx + 1), y: portsY };
+      // Inputs are left-aligned
+      const x = node.x + 11 + 6 + idx * 24;
+      return { x, y };
     }
   }, [nodes]);
 
@@ -385,6 +416,18 @@ export default function NodeEditor({ stratCols, setStratCols, stratSignal, setSt
               const d = `M ${from.x} ${from.y} C ${from.x + dx} ${from.y}, ${to.x - dx} ${to.y}, ${to.x} ${to.y}`;
               return <path key={i} className="node-connection-path" d={d} />;
             })}
+            
+            {/* Active Connecting Line */}
+            {connecting && (
+              <path 
+                className="node-connection-path" 
+                style={{ stroke: 'var(--accent-cyan)', strokeDasharray: '5,5' }}
+                d={`M ${getPortPosition(connecting.nodeId, connecting.portName, connecting.portType).x} ${getPortPosition(connecting.nodeId, connecting.portName, connecting.portType).y} 
+                    C ${getPortPosition(connecting.nodeId, connecting.portName, connecting.portType).x + 50} ${getPortPosition(connecting.nodeId, connecting.portName, connecting.portType).y}, 
+                      ${mousePos.x - 50} ${mousePos.y}, 
+                      ${mousePos.x} ${mousePos.y}`} 
+              />
+            )}
           </svg>
 
           {/* Node Cards */}
@@ -488,13 +531,18 @@ export default function NodeEditor({ stratCols, setStratCols, stratSignal, setSt
       </div>
 
       {/* Toolbar */}
-      <div className="node-toolbar">
-        <button type="button" className="btn" onClick={clearCanvas} style={{ fontSize: '0.85rem' }}>
-          Clear Canvas
-        </button>
-        <button type="button" className="btn btn-primary" onClick={compileGraph} style={{ fontSize: '0.85rem' }}>
-          ⚡ Compile to Strategy
-        </button>
+      <div className="node-toolbar" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ color: 'var(--color-text-dim)', fontSize: '0.8rem' }}>
+          Nodes: {nodes.length} | Connections: {connections.length}
+        </div>
+        <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <button type="button" className="btn" onClick={clearCanvas} style={{ fontSize: '0.85rem' }}>
+            Clear Canvas
+          </button>
+          <button type="button" className="btn btn-primary" onClick={compileGraph} style={{ fontSize: '0.85rem' }}>
+            ⚡ Compile to Strategy
+          </button>
+        </div>
       </div>
     </div>
   );

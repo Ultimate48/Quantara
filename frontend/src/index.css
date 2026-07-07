@@ -1114,13 +1114,14 @@ body {
 
 .node-connection-path {
   fill: none;
-  stroke: rgba(6, 182, 212, 0.4);
-  stroke-width: 2;
+  stroke: var(--accent-cyan);
+  stroke-width: 3;
+  filter: drop-shadow(0 0 3px rgba(6, 182, 212, 0.5));
 }
 
 .node-connection-path:hover {
-  stroke: var(--accent-cyan);
-  stroke-width: 3;
+  stroke: #ffffff;
+  stroke-width: 4;
 }
 
 /* Node Cards */
